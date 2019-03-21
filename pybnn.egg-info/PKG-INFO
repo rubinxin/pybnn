@@ -1,0 +1,13 @@
+Metadata-Version: 1.2
+Name: pybnn
+Version: 0.0.5
+Summary: Simple python framework for Bayesian neural networks
+Home-page: https://github.com/automl/pybnn
+Author: Aaron Klein, Moritz Freidank
+Author-email: kleinaa@cs.uni-freiburg.de
+License: BSD 3-Clause License
+Description: UNKNOWN
+Keywords: python,Bayesian,neural networks
+Platform: UNKNOWN
+Classifier: Development Status :: 4 - Beta
+Requires-Python: >=3

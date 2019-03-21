@@ -26,6 +26,6 @@ comment:
   require_changes: no
 
 ignore:
-    - "pybnn/notebooks/.*"
+    - "pybnn/example/.*"
     - "pybnn/setup.py"
     - "pybnn/test/*"
