@@ -6,8 +6,11 @@
 Bayesian neural networks for Bayesian optimization based on pytorch.
 
  It contains implementations for:
- - [Scalable Bayesian Optimization Using Deep Neural Networks](https://arxiv.org/pdf/1502.05700.pdf) (DNGO)
- - [Bayesian optimization with robust Bayesian neural networks](https://ml.informatik.uni-freiburg.de/papers/16-NIPS-BOHamiANN.pdf) (BOHAMIANN)
+ - [Scalable Bayesian Optimization Using Deep Neural Networks](https://arxiv.org/pdf/1502.05700.pdf) (DNGO which is BLR)
+ - [Bayesian optimization with robust Bayesian neural networks](https://ml.informatik.uni-freiburg.de/papers/16-NIPS-BOHamiANN.pdf) (BOHAMIANN which is HMC-based)
+ - [Dropout as a Bayesian approximation: Representing model uncertainty in deep learning](http://proceedings.mlr.press/v48/gal16.pdf)(MCDROP)
+ - Our Loss-Callibrated BNN Method
+
 
 # Installation
 
