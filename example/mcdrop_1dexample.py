@@ -3,7 +3,7 @@ import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 
-from pybnn import MCDROP
+from pybnn import MCDROP, MCCONCRETEDROP
 from pybnn.util.normalization import zero_mean_unit_var_normalization, zero_mean_unit_var_denormalization
 
 # plt.rc('text', usetex=True)
@@ -29,7 +29,7 @@ plt.xlim(0, 1)
 plt.show()
 
 # -- Train Model ---
-model = MCDROP()
+model = MCCONCRETEDROP(T=50)
 model.train(x[:, None], y)
 
 # -- Predict with Model ---

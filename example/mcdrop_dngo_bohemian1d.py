@@ -3,11 +3,11 @@ import matplotlib
 matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 from experiments.math_functions import get_function
-from pybnn import MCDROP, DNGO, Bohamiann
+from pybnn import MCDROP, DNGO, Bohamiann, MCCONCRETEDROP
 import time
 
 f = lambda x: np.sinc(x * 10 - 5)
-n_init = 20
+n_init = 30
 rng = np.random.RandomState(42)
 x = rng.rand(n_init)
 y = f(x)
@@ -18,13 +18,20 @@ grid = grid[:,None]
 
 start_time = time.time()
 # -- Train and Prediction with MC Model ---
-tau = 1.0
+tau = 10.0
 T = 100
 dropout = 0.05
 model_mcdrop = MCDROP(dropout=dropout, tau = tau, T= T)
 model_mcdrop.train(x, y.flatten())
 m_mcdrop, v_mcdrop = model_mcdrop.predict(grid)
 mcdrop_complete_time = time.time()
+
+# -- Train and Prediction with MC Model ---
+model_mcconcdrop = MCCONCRETEDROP(T=T)
+model_mcconcdrop.train(x, y.flatten())
+m_mcconcdrop, v_mcconcdrop = model_mcconcdrop.predict(grid)
+mcconcdrop_complete_time = time.time()
+
 
 # -- Train and Prediction with DNGO Model ---
 model_dngo = DNGO(do_mcmc=False)
@@ -40,21 +47,23 @@ boham_complete_time = time.time()
 
 # -- Print Results ---
 loss_mcdrop = np.sqrt(np.mean((m_mcdrop - fvals)**2))
+loss_mcconcdrop = np.sqrt(np.mean((m_mcconcdrop - fvals)**2))
 loss_dngo = np.sqrt(np.mean((m_dngo - fvals)**2))
 loss_boham = np.sqrt(np.mean((m_boham - fvals)**2))
 
 print(f'MC_Dropout: time={mcdrop_complete_time-start_time}, rms_loss={loss_mcdrop}')
-print(f'DNGO_Dropout: time={dngo_complete_time-mcdrop_complete_time}, rms_loss={loss_dngo}')
-print(f'Bohamian_Dropout: time={boham_complete_time-dngo_complete_time}, rms_loss={loss_boham}')
+print(f'MC_ConcDropout: time={mcconcdrop_complete_time-mcdrop_complete_time}, rms_loss={loss_mcconcdrop}')
+print(f'DNGO: time={dngo_complete_time-mcconcdrop_complete_time}, rms_loss={loss_dngo}')
+print(f'Bohamian: time={boham_complete_time-dngo_complete_time}, rms_loss={loss_boham}')
 
 # -- Plot Results ---
 figure, axes = plt.subplots(2, 2, figsize=(6, 18))
-subplot_titles = ['True Func, RMSE='+str(round(0.00,3)),
-                  'MC Dropout, RMSE='+str(round(loss_mcdrop,3)),
+subplot_titles = ['MC Dropout, RMSE='+str(round(loss_mcdrop,3)),
+                   'MC_ConcDropout, RMSE='+str(round(loss_mcconcdrop,3)),
                   'DNGO, RMSE='+str(round(loss_dngo,3)),
                   'Bohamiann, RMSE='+str(round(loss_boham,3))]
-pred_means = [fvals, m_mcdrop, m_dngo, m_boham]
-pred_var = [np.atleast_2d(0), v_mcdrop, v_dngo, v_boham]
+pred_means = [m_mcdrop, m_mcconcdrop, m_dngo, m_boham]
+pred_var = [v_mcdrop, v_mcconcdrop, v_dngo, v_boham]
 axes_set = [axes[0,0], axes[0,1],axes[1,0],axes[1,1]]
 for i in range(len(subplot_titles)):
 
