@@ -1,48 +1,116 @@
 import time
 import logging
-import numpy as np
 
 import torch
-import torch.nn as nn
-import torch.optim as optim
+from torch import nn
+from torch.nn import functional as F
+from torch import optim
 from torch.autograd import Variable
-
+import numpy as np
 from pybnn.base_model import BaseModel
 from pybnn.util.normalization import zero_mean_unit_var_normalization, zero_mean_unit_var_denormalization
 
+np.random.seed(0)
+torch.manual_seed(0)
+torch.cuda.manual_seed(0)
+
+
+class ConcreteDropout(nn.Module):
+    def __init__(self, weight_regularizer=1e-6,
+                 dropout_regularizer=1e-5, init_min=0.1, init_max=0.1):
+        super(ConcreteDropout, self).__init__()
+
+        self.weight_regularizer = weight_regularizer
+        self.dropout_regularizer = dropout_regularizer
+
+        init_min = np.log(init_min) - np.log(1. - init_min)
+        init_max = np.log(init_max) - np.log(1. - init_max)
+
+        self.p_logit = nn.Parameter(torch.empty(1).uniform_(init_min, init_max))
+
+    def forward(self, x, layer):
+        p = torch.sigmoid(self.p_logit)
+
+        out = layer(self._concrete_dropout(x, p))
+
+        sum_of_square = 0
+        for param in layer.parameters():
+            sum_of_square += torch.sum(torch.pow(param, 2))
+
+        weights_regularizer = self.weight_regularizer * sum_of_square / (1 - p)
+
+        dropout_regularizer = p * torch.log(p)
+        dropout_regularizer += (1. - p) * torch.log(1. - p)
+
+        input_dimensionality = x[0].numel()  # Number of elements of first item in batch
+        dropout_regularizer *= self.dropout_regularizer * input_dimensionality
+
+        regularization = weights_regularizer + dropout_regularizer
+        return out, regularization
+
+    def _concrete_dropout(self, x, p):
+        eps = 1e-7
+        temp = 0.1
+
+        unif_noise = torch.rand_like(x)
+
+        drop_prob = (torch.log(p + eps)
+                     - torch.log(1 - p + eps)
+                     + torch.log(unif_noise + eps)
+                     - torch.log(1 - unif_noise + eps))
+
+        drop_prob = torch.sigmoid(drop_prob / temp)
+        random_tensor = 1 - drop_prob
+        retain_prob = 1 - p
+
+        x = torch.mul(x, random_tensor)
+        x /= retain_prob
+
+        return x
 
 class Net(nn.Module):
-    def __init__(self, n_inputs, dropout_p, decay, n_units=[50, 50, 50]):
+    def __init__(self, n_inputs, n_units=[50, 50, 50],
+                 weight_regularizer=1e-6, dropout_regularizer=1e-5):
         super(Net, self).__init__()
-        self.decay = decay
-        self.dropout_p = dropout_p
-        self.dropout = nn.Dropout(p=self.dropout_p)
-        self.fc1 = nn.Linear(n_inputs, n_units[0])
-        self.fc2 = nn.Linear(n_units[0], n_units[1])
-        self.fc3 = nn.Linear(n_units[1], n_units[2])
-        self.out = nn.Linear(n_units[2], 1)
+        self.linear1 = nn.Linear(n_inputs, n_units[0])
+        self.linear2 = nn.Linear(n_units[0], n_units[1])
+        self.linear3 = nn.Linear(n_units[1], n_units[2])
+        self.out_mu = nn.Linear(n_units[2], 1)
+        self.out_logvar = nn.Linear(n_units[2], 1)
+        self.conc_drop1 = ConcreteDropout(weight_regularizer=weight_regularizer,
+                                          dropout_regularizer=dropout_regularizer)
+        self.conc_drop2 = ConcreteDropout(weight_regularizer=weight_regularizer,
+                                          dropout_regularizer=dropout_regularizer)
+        self.conc_drop3 = ConcreteDropout(weight_regularizer=weight_regularizer,
+                                          dropout_regularizer=dropout_regularizer)
+        self.conc_drop_mu = ConcreteDropout(weight_regularizer=weight_regularizer,
+                                            dropout_regularizer=dropout_regularizer)
+        self.conc_drop_logvar = ConcreteDropout(weight_regularizer=weight_regularizer,
+                                                dropout_regularizer=dropout_regularizer)
+
+        self.tanh = nn.Tanh()
+
 
     def forward(self, x):
 
-        x = torch.tanh(self.fc1(x))
-        x = self.dropout(x)
+        regularization = torch.empty(4, device=x.device)
+        x1 = self.tanh(self.linear1(x))
+        # x1, regularization[0] = self.conc_drop1(x, nn.Sequential(self.linear1, self.tanh))
+        x2, regularization[0] = self.conc_drop2(x1, nn.Sequential(self.linear2, self.tanh))
+        x3, regularization[1] = self.conc_drop3(x2, nn.Sequential(self.linear3, self.tanh))
 
-        x = torch.tanh(self.fc2(x))
-        x = self.dropout(x)
+        mean, regularization[2] = self.conc_drop_mu(x3, self.out_mu)
+        log_var, regularization[3] = self.conc_drop_logvar(x3, self.out_logvar)
 
-        x = torch.tanh(self.fc3(x))
-        x = self.dropout(x)
+        return mean, log_var, regularization.sum()
 
-        return self.out(x)
+class MCCONCRETEDROP(BaseModel):
 
-
-class MCDROP(BaseModel):
-
-    def __init__(self, batch_size=10, num_epochs=500,
+    def __init__(self, batch_size=10, num_epochs=1000,
                  learning_rate=0.01,
                  adapt_epoch=5000, n_units_1=50, n_units_2=50, n_units_3=50,
-                 dropout_p = 0.05, length_scale = 1e-1, weight_decay = 1e-6, T = 100,
-                 normalize_input=True, normalize_output=True, rng=None, gpu=True):
+                 length_scale = 1e-4, T = 100,
+                 normalize_input=True, normalize_output=True, rng=None):
         """
         This module performs MC Dropout for a fully connected
         feed forward neural network.
@@ -80,22 +148,18 @@ class MCDROP(BaseModel):
         if rng is None:
             self.rng = np.random.RandomState(np.random.randint(0, 10000))
         else:
-            self.rng = np.random.RandomState(rng)
-
-        self.seed = rng
-        torch.manual_seed(self.seed)
+            self.rng = rng
 
         self.X = None
         self.y = None
         self.network = None
-        # self.tau = tau
-        self.decay = weight_decay
         self.length_scale = length_scale
-        self.dropout_p = dropout_p
+        # self.weight_regularizer = weight_regularizer
+        # self.dropout_regularizer = dropout_regularizer
+
         self.T = T
         self.normalize_input = normalize_input
         self.normalize_output = normalize_output
-        self.gpu = gpu
 
         self.num_epochs = num_epochs
         self.batch_size = batch_size
@@ -107,9 +171,6 @@ class MCDROP(BaseModel):
         self.adapt_epoch = adapt_epoch # TODO check
         self.network = None
         self.models = []
-
-        # Use GPU
-        self.device = torch.device("cuda: 0" if torch.cuda.is_available() else "cpu")
 
     @BaseModel._check_shapes_train
     def train(self, X, y):
@@ -125,7 +186,6 @@ class MCDROP(BaseModel):
             The corresponding target values.
 
         """
-
         start_time = time.time()
 
         # Normalize inputs
@@ -142,23 +202,22 @@ class MCDROP(BaseModel):
 
         self.y = self.y[:, None]
 
+        N = self.X.shape[0]
+
+
         # Check if we have enough points to create a minibatch otherwise use all data points
-        if self.X.shape[0] <= self.batch_size:
-            batch_size = self.X.shape[0]
+        if N <= self.batch_size:
+            batch_size = N
         else:
             batch_size = self.batch_size
 
         # Create the neural network
         features = X.shape[1]
+        wr = self.length_scale ** 2. / N
+        dr = 2. / N
+        network = Net(n_inputs=features, n_units=[self.n_units_1, self.n_units_2, self.n_units_3],
+                      weight_regularizer=wr, dropout_regularizer=dr)
 
-        network = Net(n_inputs=features, dropout_p=self.dropout_p, decay=self.decay,
-                      n_units=[self.n_units_1, self.n_units_2, self.n_units_3])
-
-        if self.gpu:
-            network = network.to(self.device)
-
-        # optimizer = optim.Adam(network.parameters(),
-        #                        lr=self.init_learning_rate, weight_decay=network.decay)
         optimizer = optim.Adam(network.parameters(),
                                lr=self.init_learning_rate)
 
@@ -174,16 +233,15 @@ class MCDROP(BaseModel):
             for batch in self.iterate_minibatches(self.X, self.y,
                                                   batch_size, shuffle=True):
 
-                inputs = Variable(torch.Tensor(batch[0]))
-                targets = Variable(torch.Tensor(batch[1]))
-
-                if self.gpu:
-                    inputs = inputs.to(self.device)
-                    targets = targets.to(self.device)
+                # inputs = torch.Tensor(batch[0])
+                # targets = torch.Tensor(batch[1])
+                inputs  = Variable(torch.FloatTensor(batch[0]))
+                targets = Variable(torch.FloatTensor(batch[1]))
 
                 optimizer.zero_grad()
                 output = network(inputs)
-                loss = torch.nn.functional.mse_loss(output, targets)
+                loss = torch.nn.functional.mse_loss(output[0], targets)
+
                 loss.backward()
                 optimizer.step()
 
@@ -232,7 +290,6 @@ class MCDROP(BaseModel):
             predictive variance
 
         """
-
         # Normalize inputs
         if self.normalize_input:
             X_, _, _ = zero_mean_unit_var_normalization(X_test, self.X_mean, self.X_std)
@@ -242,27 +299,23 @@ class MCDROP(BaseModel):
         # Perform MC dropout
         model = self.model
         T     = self.T
+        model.eval()
+        # MC_samples : list T x N x 1
+        # Yt_hat = np.array([model(torch.Tensor(X_)).data.numpy() for _ in range(T)])
+        MC_samples = [model(Variable(torch.FloatTensor(X_))) for _ in range(T)]
+        means = torch.stack([tup[0] for tup in MC_samples]).view(T, X_.shape[0]).data.numpy()
+        logvar = torch.stack([tup[1] for tup in MC_samples]).view(T, X_.shape[0]).data.numpy()
+        # Yt_hat = Yt_hat * self.std_y_train + self.mean_y_train  # T x N TODO check with Adam
+        aleatoric_uncertainty = np.exp(logvar).mean(0)
+        # tau =
+        epistemic_uncertainty = np.var(means, 0).mean(0)
 
-        # Yt_hat: T x N x 1
-        if self.gpu:
-            model.cpu()
-            # Yt_hat = np.array([model(Variable(torch.Tensor(X_))).data.numpy() for _ in range(T)])
-            Yt_hat = np.hstack([model(Variable(torch.Tensor(X_[:, np.newaxis]))).data.numpy() for _ in range(T)])
-            # X_tensor = X_tensor.to(self.device)
-            # Yt_hat = np.hstack([model(Variable(torch.Tensor(X_[:, np.newaxis]))).cpu().data.numpy() for i in range(T)])
-        else:
-            # Yt_hat = np.array([model(Variable(torch.Tensor(X_))).data.numpy() for _ in range(T)])
-            Yt_hat = np.hstack([model(Variable(torch.Tensor(X_[:, np.newaxis]))).data.numpy() for _ in range(T)])
+        MC_pred_mean = np.mean(means, 0)  # N x 1
 
-        tau = self.length_scale**2 * (1.0 - self.model.dropout_p) / (2. * self.model.decay * self.X.shape[0])
-        # MC_pred_mean = np.mean(Yt_hat, 0)  # N x 1
-        # Second_moment = np.mean(Yt_hat ** 2, 0) # N x 1
-        # MC_pred_var = Second_moment + 1./ tau - (MC_pred_mean ** 2)
+        Second_moment = np.mean(means ** 2, 0) # N x 1
+        MC_pred_var = Second_moment + epistemic_uncertainty - (MC_pred_mean ** 2)
 
-        MC_pred_mean = Yt_hat.mean(axis=1)
-        MC_pred_var = Yt_hat.var(axis=1) + 1./tau
-
-        m = MC_pred_mean
+        m = MC_pred_mean.flatten()
 
         if MC_pred_var.shape[0] == 1:
             v = np.clip(MC_pred_var, np.finfo(MC_pred_var.dtype).eps, np.inf)
@@ -291,7 +344,7 @@ class MCDROP(BaseModel):
             the observed value of the incumbent
         """
 
-        inc, inc_value = super(MCDROP, self).get_incumbent()
+        inc, inc_value = super(MCCONCRETEDROP, self).get_incumbent()
         if self.normalize_input:
             inc = zero_mean_unit_var_denormalization(inc, self.X_mean, self.X_std)
 

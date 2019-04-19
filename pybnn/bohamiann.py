@@ -69,7 +69,8 @@ class Bohamiann(BaseModel):
                  metrics=(nn.MSELoss,),
                  likelihood_function=nll,
                  print_every_n_steps=100,
-                 ) -> None:
+                 gpu=False,
+                 rng = 42) -> None:
         """
 
         Bayesian Neural Networks use Bayesian methods to estimate the posterior
@@ -106,6 +107,11 @@ class Bohamiann(BaseModel):
         self.sampled_weights = []  # type: typing.List[typing.Tuple[np.ndarray]]
         self.likelihood_function = likelihood_function
         self.sampler = None
+        self.gpu = gpu #TODO not working for gpu
+        self.device = torch.device("cuda: 0" if torch.cuda.is_available() else "cpu")
+        self.seed = rng
+        np.random.rand(self.seed)
+        torch.manual_seed(self.seed)
 
     @property
     def network_weights(self) -> tuple:
@@ -164,6 +170,7 @@ class Bohamiann(BaseModel):
         :param continue_training: defines whether we want to continue from the last training run
         :param verbose: verbose output
         """
+
         logging.debug("Training started.")
         start_time = time.time()
 
@@ -259,9 +266,17 @@ class Bohamiann(BaseModel):
                                      mdecay=dtype(mdecay),
                                      lr=dtype(lr))
 
+        if self.gpu:
+            self.model = self.model.to(self.device)
+
         batch_generator = islice(enumerate(train_loader), num_steps)
 
         for step, (x_batch, y_batch) in batch_generator:
+
+            if self.gpu:
+                x_batch = x_batch.to(self.device)
+                y_batch = y_batch.to(self.device)
+
             self.sampler.zero_grad()
             loss = self.likelihood_function(input=self.model(x_batch), target=y_batch)
             # Add prior. Note the gradient is computed by: g_prior + N/n sum_i grad_theta_xi see Eq 4
@@ -412,6 +427,7 @@ class Bohamiann(BaseModel):
         :param return_individual_predictions: if True also the predictions of the individual models are returned
         :return: mean and variance
         """
+
         x_test_ = np.asarray(x_test)
 
         if self.do_normalize_input:

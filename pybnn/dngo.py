@@ -43,7 +43,7 @@ class DNGO(BaseModel):
                  adapt_epoch=5000, n_units_1=50, n_units_2=50, n_units_3=50,
                  alpha=1.0, beta=1000, prior=None, do_mcmc=True,
                  n_hypers=20, chain_length=2000, burnin_steps=2000,
-                 normalize_input=True, normalize_output=True, rng=None):
+                 normalize_input=True, normalize_output=True, rng=None, gpu=True):
         """
         Deep Networks for Global Optimization [1]. This module performs
         Bayesian Linear Regression with basis function extracted from a
@@ -96,7 +96,10 @@ class DNGO(BaseModel):
         if rng is None:
             self.rng = np.random.RandomState(np.random.randint(0, 10000))
         else:
-            self.rng = rng
+            self.rng = np.random.RandomState(rng)
+
+        self.seed = rng
+        torch.manual_seed(self.seed)
 
         self.X = None
         self.y = None
@@ -105,6 +108,7 @@ class DNGO(BaseModel):
         self.beta = beta
         self.normalize_input = normalize_input
         self.normalize_output = normalize_output
+        self.gpu = gpu
 
         # MCMC hyperparameters
         self.do_mcmc = do_mcmc
@@ -130,6 +134,9 @@ class DNGO(BaseModel):
         self.models = []
         self.hypers = None
 
+        # Use GPU
+        self.device = torch.device("cuda: 0" if torch.cuda.is_available() else "cpu")
+
     @BaseModel._check_shapes_train
     def train(self, X, y, do_optimize=True):
         """
@@ -147,6 +154,7 @@ class DNGO(BaseModel):
             the default hyperparameters are used.
 
         """
+
         start_time = time.time()
 
         # Normalize inputs
@@ -172,7 +180,14 @@ class DNGO(BaseModel):
         # Create the neural network
         features = X.shape[1]
 
-        self.network = Net(n_inputs=features, n_units=[self.n_units_1, self.n_units_2, self.n_units_3])
+        network = Net(n_inputs=features, n_units=[self.n_units_1, self.n_units_2, self.n_units_3])
+
+        if self.gpu:
+            # print('use gpu')
+            self.network = network.to(self.device)
+        else:
+            # print('use cpu')
+            self.network = network
 
         optimizer = optim.Adam(self.network.parameters(),
                                lr=self.init_learning_rate)
@@ -188,8 +203,13 @@ class DNGO(BaseModel):
 
             for batch in self.iterate_minibatches(self.X, self.y,
                                                   batch_size, shuffle=True):
+
                 inputs = torch.Tensor(batch[0])
                 targets = torch.Tensor(batch[1])
+
+                if self.gpu:
+                    inputs = inputs.to(self.device)
+                    targets = targets.to(self.device)
 
                 optimizer.zero_grad()
                 output = self.network(inputs)
@@ -209,7 +229,13 @@ class DNGO(BaseModel):
             logging.debug("Training loss:\t\t{:.5g}".format(train_err / train_batches))
 
         # Design matrix
-        self.Theta = self.network.basis_funcs(torch.Tensor(self.X)).data.numpy()
+        X_tensor = torch.Tensor(self.X)
+
+        network = self.network
+        if self.gpu:
+            network.cpu()
+
+        self.Theta = network.basis_funcs(X_tensor).data.numpy()
 
         if do_optimize:
             if self.do_mcmc:
@@ -353,6 +379,7 @@ class DNGO(BaseModel):
             predictive variance
 
         """
+
         # Normalize inputs
         if self.normalize_input:
             X_, _, _ = zero_mean_unit_var_normalization(X_test, self.X_mean, self.X_std)
@@ -360,8 +387,12 @@ class DNGO(BaseModel):
             X_ = X_test
 
         # Get features from the net
+        if self.gpu:
+            network = self.network.cpu()
+        else:
+            network = self.network
 
-        theta = self.network.basis_funcs(torch.Tensor(X_)).data.numpy()
+        theta = network.basis_funcs(torch.Tensor(X_)).data.numpy()
 
         # Marginalise predictions over hyperparameters of the BLR
         mu = np.zeros([len(self.models), X_test.shape[0]])

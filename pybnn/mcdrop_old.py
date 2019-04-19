@@ -5,32 +5,31 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.autograd import Variable
 
 from pybnn.base_model import BaseModel
 from pybnn.util.normalization import zero_mean_unit_var_normalization, zero_mean_unit_var_denormalization
+from pybnn.bayesian_linear_regression import BayesianLinearRegression, Prior
 
 
 class Net(nn.Module):
-    def __init__(self, n_inputs, dropout_p, decay, n_units=[50, 50, 50]):
+    def __init__(self, n_inputs, dropout, n_units=[50, 50, 50]):
         super(Net, self).__init__()
-        self.decay = decay
-        self.dropout_p = dropout_p
-        self.dropout = nn.Dropout(p=self.dropout_p)
+        self.dropout = nn.Dropout(p=dropout)
         self.fc1 = nn.Linear(n_inputs, n_units[0])
         self.fc2 = nn.Linear(n_units[0], n_units[1])
         self.fc3 = nn.Linear(n_units[1], n_units[2])
         self.out = nn.Linear(n_units[2], 1)
+        self.tanh = nn.Tanh()
 
     def forward(self, x):
 
-        x = torch.tanh(self.fc1(x))
+        x = self.tanh(self.fc1(x))
         x = self.dropout(x)
 
-        x = torch.tanh(self.fc2(x))
+        x = self.tanh(self.fc2(x))
         x = self.dropout(x)
 
-        x = torch.tanh(self.fc3(x))
+        x = self.tanh(self.fc3(x))
         x = self.dropout(x)
 
         return self.out(x)
@@ -41,8 +40,8 @@ class MCDROP(BaseModel):
     def __init__(self, batch_size=10, num_epochs=500,
                  learning_rate=0.01,
                  adapt_epoch=5000, n_units_1=50, n_units_2=50, n_units_3=50,
-                 dropout_p = 0.05, length_scale = 1e-1, weight_decay = 1e-6, T = 100,
-                 normalize_input=True, normalize_output=True, rng=None, gpu=True):
+                 dropout = 0.05, tau = 1000.0, T = 100,
+                 normalize_input=True, normalize_output=True, rng=None):
         """
         This module performs MC Dropout for a fully connected
         feed forward neural network.
@@ -80,22 +79,16 @@ class MCDROP(BaseModel):
         if rng is None:
             self.rng = np.random.RandomState(np.random.randint(0, 10000))
         else:
-            self.rng = np.random.RandomState(rng)
-
-        self.seed = rng
-        torch.manual_seed(self.seed)
+            self.rng = rng
 
         self.X = None
         self.y = None
         self.network = None
-        # self.tau = tau
-        self.decay = weight_decay
-        self.length_scale = length_scale
-        self.dropout_p = dropout_p
+        self.tau = tau
+        self.dropout = dropout
         self.T = T
         self.normalize_input = normalize_input
         self.normalize_output = normalize_output
-        self.gpu = gpu
 
         self.num_epochs = num_epochs
         self.batch_size = batch_size
@@ -107,9 +100,6 @@ class MCDROP(BaseModel):
         self.adapt_epoch = adapt_epoch # TODO check
         self.network = None
         self.models = []
-
-        # Use GPU
-        self.device = torch.device("cuda: 0" if torch.cuda.is_available() else "cpu")
 
     @BaseModel._check_shapes_train
     def train(self, X, y):
@@ -125,7 +115,6 @@ class MCDROP(BaseModel):
             The corresponding target values.
 
         """
-
         start_time = time.time()
 
         # Normalize inputs
@@ -151,16 +140,10 @@ class MCDROP(BaseModel):
         # Create the neural network
         features = X.shape[1]
 
-        network = Net(n_inputs=features, dropout_p=self.dropout_p, decay=self.decay,
-                      n_units=[self.n_units_1, self.n_units_2, self.n_units_3])
+        network = Net(n_inputs=features, dropout=self.dropout, n_units=[self.n_units_1, self.n_units_2, self.n_units_3])
 
-        if self.gpu:
-            network = network.to(self.device)
-
-        # optimizer = optim.Adam(network.parameters(),
-        #                        lr=self.init_learning_rate, weight_decay=network.decay)
         optimizer = optim.Adam(network.parameters(),
-                               lr=self.init_learning_rate)
+                               lr=self.init_learning_rate, )
 
         # Start training
         lc = np.zeros([self.num_epochs])
@@ -173,13 +156,8 @@ class MCDROP(BaseModel):
 
             for batch in self.iterate_minibatches(self.X, self.y,
                                                   batch_size, shuffle=True):
-
-                inputs = Variable(torch.Tensor(batch[0]))
-                targets = Variable(torch.Tensor(batch[1]))
-
-                if self.gpu:
-                    inputs = inputs.to(self.device)
-                    targets = targets.to(self.device)
+                inputs = torch.Tensor(batch[0])
+                targets = torch.Tensor(batch[1])
 
                 optimizer.zero_grad()
                 output = network(inputs)
@@ -232,7 +210,6 @@ class MCDROP(BaseModel):
             predictive variance
 
         """
-
         # Normalize inputs
         if self.normalize_input:
             X_, _, _ = zero_mean_unit_var_normalization(X_test, self.X_mean, self.X_std)
@@ -244,25 +221,16 @@ class MCDROP(BaseModel):
         T     = self.T
 
         # Yt_hat: T x N x 1
-        if self.gpu:
-            model.cpu()
-            # Yt_hat = np.array([model(Variable(torch.Tensor(X_))).data.numpy() for _ in range(T)])
-            Yt_hat = np.hstack([model(Variable(torch.Tensor(X_[:, np.newaxis]))).data.numpy() for _ in range(T)])
-            # X_tensor = X_tensor.to(self.device)
-            # Yt_hat = np.hstack([model(Variable(torch.Tensor(X_[:, np.newaxis]))).cpu().data.numpy() for i in range(T)])
-        else:
-            # Yt_hat = np.array([model(Variable(torch.Tensor(X_))).data.numpy() for _ in range(T)])
-            Yt_hat = np.hstack([model(Variable(torch.Tensor(X_[:, np.newaxis]))).data.numpy() for _ in range(T)])
+        Yt_hat = np.array([model(torch.Tensor(X_)).data.numpy() for _ in range(T)])
+        # Yt_hat = Yt_hat * self.std_y_train + self.mean_y_train  # T x N TODO check with Adam
 
-        tau = self.length_scale**2 * (1.0 - self.model.dropout_p) / (2. * self.model.decay * self.X.shape[0])
-        # MC_pred_mean = np.mean(Yt_hat, 0)  # N x 1
-        # Second_moment = np.mean(Yt_hat ** 2, 0) # N x 1
-        # MC_pred_var = Second_moment + 1./ tau - (MC_pred_mean ** 2)
+        MC_pred_mean = np.mean(Yt_hat, 0)  # N x 1
 
-        MC_pred_mean = Yt_hat.mean(axis=1)
-        MC_pred_var = Yt_hat.var(axis=1) + 1./tau
+        Second_moment = np.mean(Yt_hat ** 2, 0) # N x 1
+        MC_pred_var = Second_moment + np.eye(Yt_hat.shape[-1]) / self.tau - (MC_pred_mean ** 2)
+        # MC_pred_var = Second_moment - (MC_pred_mean ** 2)
 
-        m = MC_pred_mean
+        m = MC_pred_mean.flatten()
 
         if MC_pred_var.shape[0] == 1:
             v = np.clip(MC_pred_var, np.finfo(MC_pred_var.dtype).eps, np.inf)

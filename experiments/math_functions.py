@@ -342,8 +342,9 @@ def get_function(target_func, big=False) \
         X_LIM = np.vstack([[-1, 1]] * 6)
 
     elif target_func.startswith('branin-2d'):
+
         f = branin
-        min_loc = np.array([0.08559, -0.6966])
+        min_loc = np.array([[-0.7522, 0.6366],[0.08559,- 0.6966],[0.9234, - 0.6699]])
         min_val = 0.0013
         X_LIM = np.array([[-1, 1], [-1, 1]])
 
